@@ -67,6 +67,11 @@ Dubbelklik op **`UNINSTALL.cmd`** (of draai `node install.mjs --uninstall`).
 
 ## Hulp bij problemen
 
+- **Iets kapot of vage fout?** Typ in je terminal (of vraag aan Claude):
+  ```bash
+  ds-subagent report
+  ```
+  Dit maakt een veilig, geanonimiseerd foutrapport (API-keys, tokens en je gebruikersnaam worden automatisch gewist) en slaat het op in `~/.dsh-subagent/bug-report.txt`. Kopieer het blok en stuur het door — dan is het zo gefixt.
 - **`ds-subagent` niet herkend?** Sluit je terminal / Claude Code volledig af en open een nieuwe zodat het vernieuwde `PATH` actief wordt.
 - **Check of alles werkt:** open PowerShell of terminal en typ `ds-subagent doctor`.
 - **Live meekijken:** terwijl DeepSeek werkt kun je `http://127.0.0.1:45721` openen in je browser.

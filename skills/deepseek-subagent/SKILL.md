@@ -38,8 +38,9 @@ ds-subagent log    <name> --tail 20
 ds-subagent cancel <name>
 ds-subagent close  <name>
 
-# Health, updates & daemon management
+# Health, diagnostics, updates & daemon management
 ds-subagent doctor
+ds-subagent report
 ds-subagent update
 ds-subagent daemon start|stop|status
 ```
