@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-subagent",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Reliable headless DeepSeek Harness subagent plugin and CLI for Antigravity and Claude Code",
   "type": "module",
   "main": "./lib/index.js",
