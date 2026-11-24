@@ -30,6 +30,7 @@ import { findDshBinary } from './lib/cli.js'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DRY_RUN = process.argv.includes('--dry-run')
 const UNINSTALL = process.argv.includes('--uninstall')
+const NO_AUTOSTART = process.argv.includes('--no-autostart')
 
 const HOME = homedir()
 const SUBAGENT_HOME = process.env.DSH_SUBAGENT_HOME || join(HOME, '.dsh-subagent')
@@ -296,7 +297,9 @@ function doInstall() {
     '  disabled: false',
     '- id: tool-fs-search',
     '  disabled: false',
-    '- id: tool-pwsh',
+    process.platform === 'win32' ? '- id: tool-pwsh' : '- id: tool-bash',
+    '  disabled: false',
+    '- id: tool-todo',
     '  disabled: false',
     '',
     '- id: dsh-subagent',
@@ -399,6 +402,17 @@ function doInstall() {
     for (const dir of SKILL_ONLY_TARGETS) {
       mkdirSync(dir, { recursive: true })
       cpSync(skillSrc, join(dir, 'SKILL.md'))
+    }
+
+    // Enable daemon autostart by default so the bridge stays available across reboots
+    if (!NO_AUTOSTART) {
+      const autoRes = spawnSync(process.execPath, [join(APP_DIR, 'bin', 'ds-subagent.mjs'), 'daemon', 'autostart', 'on'], {
+        encoding: 'utf8',
+        windowsHide: true,
+      })
+      if (autoRes.status === 0 && autoRes.stdout) {
+        log('      -> ' + autoRes.stdout.trim().split('\n')[0])
+      }
     }
   }
 

@@ -24,8 +24,9 @@ ds-subagent start <name> --cwd <project-dir> --prompt-file <brief.md>
 # Strict read-only mode (for production / diagnostics — technically enforced!)
 ds-subagent start audit --cwd /var/www/app --readonly --allow-cmd "git status" --allow-cmd "rg" "Inspect config"
 
-# Run on a remote Linux server (stays running even if your PC sleeps/closes!)
-ds-subagent host add prod --ssh user@server
+# Install & run on a remote Linux server (systemd + linger; survives PC sleep/shutdown!)
+ds-subagent host install prod --ssh user@server --api-key-stdin < mistral.key
+ds-subagent doctor --host prod
 ds-subagent start prod-audit --host prod --cwd /srv/app --readonly "Check logs and config"
 
 # Continue, steer mid-flight, watch live checklist, inspect, cancel, or close
@@ -49,10 +50,10 @@ ds-subagent update
 
 ### Important Flag & Safety Notes
 - **Safety modes (`--mode` / `--readonly`):**
-  - `--readonly` (or `--mode readonly`): technically blocks all write/edit/delete tools and blocks shell tools unless explicitly whitelisted via repeatable `--allow-cmd "<prefix>"` (shell chaining/redirection like `;`, `&&`, `|`, `>` is always blocked).
-  - `--mode workspace`: blocks write/edit tool calls targeting paths outside `--cwd`.
+  - `--readonly` (or `--mode readonly`): enforced **inside DeepSeek Harness BEFORE tool execution** (sets the real DSH sandbox to `read-only` + fail-closed approval, plus pre-execution policy enforcement returning exit code `13`). Shell-escape binaries (`ssh`, `scp`, `rsync`, `bash`, `node`, `python`, `curl`, etc.) are **forbidden** in `--allow-cmd` — for remote read-only work, always use `--host <alias> --readonly` so readonly is enforced on the server itself.
+  - `--mode workspace`: sets DSH sandbox to `workspace-write` and blocks write/edit paths outside `--cwd`.
   - `--mode full` (default): full autonomous coding access.
-- **Secret redaction is ON by default:** API keys, Bearer tokens, JWTs, PEM private keys, and DB credentials are automatically redacted from replies, errors, and logs (pass `--no-redact` only when explicitly needed).
+- **Secret redaction is ON by default:** API keys, Bearer tokens, JWTs, PEM private keys, DB credentials, Amazon LWA tokens/secrets/client IDs (`Atzr|...`, `amzn1.oa2-cs.v1...`, `amzn1.application-oa2-client...`), and `.env` `KEY=`/`SECRET=`/`TOKEN=` lines are automatically redacted from replies, errors, and logs.
 - **Omit `--effort` on Mistral `deepseek-v4-1-flash-1017`** — Mistral rejects explicit `--effort` overrides on that model.
 - **Use `--prompt-file <path>`** for large specs on Windows to avoid shell quoting limits.
 - **Non-git projects supported:** if `--cwd` is not a git repo, `ds-subagent` automatically snapshots files before/after the turn and reports `CHANGED_FILES (fs)`.

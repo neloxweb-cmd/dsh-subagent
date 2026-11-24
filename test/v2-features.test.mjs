@@ -4,11 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { runCli } from '../lib/cli.js'
+import { createBridge } from '../lib/bridge.js'
+import { estimateCostEur, runCli } from '../lib/cli.js'
+import { buildPackageBundle } from '../lib/hosts.js'
 import { captureWorkspaceSnapshot, computeWorkspaceChanges } from '../lib/index.js'
 import { EXIT_CODES } from '../lib/protocol.js'
 import { redactSecrets } from '../lib/reporter.js'
-import { checkToolPolicy, normalizeTodos, watchAgentTurn } from '../lib/watcher.js'
+import { createStore } from '../lib/store.js'
+import { checkToolPolicy, normalizeTodos, validateReadonlyAllowCommands, watchAgentTurn } from '../lib/watcher.js'
 
 test('v2 safety: checkToolPolicy enforces readonly, allowlist, chaining guard, and workspace boundary', () => {
   // readonly blocks write tools
@@ -22,7 +25,8 @@ test('v2 safety: checkToolPolicy enforces readonly, allowlist, chaining guard, a
   const ro = { mode: 'readonly', allowCommands: ['git status', 'ls'] }
   assert.equal(checkToolPolicy(ro, 'bash', { command: 'git status' }), null)
   assert.equal(checkToolPolicy(ro, 'bash', { command: 'ls -la' }), null)
-  assert.match(checkToolPolicy(ro, 'bash', { command: 'rm -rf /' }) ?? '', /not in allowlist/)
+  assert.match(checkToolPolicy(ro, 'bash', { command: 'rm -rf /' }) ?? '', /forbidden/)
+  assert.match(checkToolPolicy(ro, 'bash', { command: 'cat /etc/hosts' }) ?? '', /not in allowlist/)
   assert.match(checkToolPolicy(ro, 'bash', { command: 'git status && rm -rf /' }) ?? '', /chaining/)
   assert.match(checkToolPolicy(ro, 'bash', { command: 'ls > out.txt' }) ?? '', /chaining/)
 
@@ -146,4 +150,170 @@ test('v2 normalizeTodos handles varied DSH todo shapes', () => {
     out.map((x) => x.status),
     ['completed', 'in_progress', 'pending'],
   )
+})
+
+test('v2.1 readonly allowlist blocks ssh/scp/rsync/shells/mutating subcommands and allows safe reads', () => {
+  for (const bad of [
+    'ssh user@prod',
+    'scp a b',
+    'rsync -av a b',
+    'sftp prod',
+    'bash -c ls',
+    'pwsh -Command ls',
+    'node -e 1',
+    'python -c 1',
+    'curl https://example.com',
+    'git push origin main',
+    'docker exec -it app sh',
+    'systemctl restart nginx',
+    'ls && rm -rf /',
+  ]) {
+    const err = validateReadonlyAllowCommands([bad])
+    assert.ok(err, `expected "${bad}" to be rejected in readonly mode`)
+  }
+  assert.match(validateReadonlyAllowCommands(['ssh prod']) ?? '', /--host/)
+
+  for (const ok of ['git status', 'git log', 'ls', 'rg', 'systemctl status nginx', 'docker ps']) {
+    assert.equal(validateReadonlyAllowCommands([ok]), null, `expected "${ok}" to be allowed`)
+  }
+})
+
+test('v2.1 redaction: strips Amazon refresh/LWA/client tokens and generic .env KEY/SECRET/TOKEN lines', () => {
+  const fakePayload = [
+    'REFRESH_TOKEN=Atzr|IwEBIA_FAKE_AMAZON_REFRESH_TOKEN_1234567890ABCDEF',
+    'LWA_SECRET=amzn1.oa2-cs.v1.a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6',
+    'LWA_CLIENT=amzn1.application-oa2-client.00112233445566778899aabbccddeeff',
+    'export MY_CUSTOM_SECRET=SuperFakeEnvSecretValue99',
+    'SP_API_KEY="AnotherFakeKeyValue12345"',
+    'NORMAL_LINE=hello_world',
+  ].join('\n')
+
+  const clean = redactSecrets(fakePayload, { redactPaths: false })
+  assert.doesNotMatch(clean, /IwEBIA_FAKE_AMAZON_REFRESH_TOKEN/)
+  assert.doesNotMatch(clean, /a1b2c3d4e5f6a1b2c3d4e5f6/)
+  assert.doesNotMatch(clean, /00112233445566778899aabbccddeeff/)
+  assert.doesNotMatch(clean, /SuperFakeEnvSecretValue99/)
+  assert.doesNotMatch(clean, /AnotherFakeKeyValue12345/)
+  assert.match(clean, /NORMAL_LINE=hello_world/)
+})
+
+test('v2.1 bridge + CLI: blocks --allow-cmd ssh upfront, blocks mode switch on existing session, shows EUR cost & remote non-git CHANGED_FILES', async (t) => {
+  const home = await mkdtemp(join(tmpdir(), 'dsh-subagent-v21-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+
+  const store = createStore({ home })
+  await store.init()
+  const receivedCwds = []
+  const host = {
+    listDshSessions: () => [],
+    describeRoute: () => ({ provider: 'mistral', model: 'deepseek-v4-1-flash-1017' }),
+    runTurn: async (input) => {
+      receivedCwds.push(input.cwd)
+      return {
+        status: 'done',
+        text: 'All done on server.',
+        sessionId: 'dsh-s1',
+        gitChanges: {
+          mode: 'fs',
+          isGitRepo: false,
+          dirtyTotal: 1,
+          changedThisTurn: [{ path: 'config.yml', status: 'M' }],
+          diffStat: '',
+        },
+        stats: {
+          elapsedMs: 1200,
+          steps: 2,
+          toolCalls: 3,
+          lastTool: 'edit',
+          usage: { inputTokens: 12000, cacheReadTokens: 4000, outputTokens: 1500 },
+          todos: [],
+          recentEvents: [],
+        },
+      }
+    },
+  }
+
+  const bridge = createBridge({
+    store,
+    host,
+    config: { host: '127.0.0.1', port: 0, token: 'test-token-v21-0123456789abcdef' },
+  })
+  const url = await bridge.listen()
+  t.after(() => bridge.close())
+
+  const run = async (argv) => {
+    let stdout = ''
+    let stderr = ''
+    const code = await runCli(argv, {
+      env: { DSH_SUBAGENT_HOME: home },
+      stdout: { write: (s) => (stdout += s) },
+      stderr: { write: (s) => (stderr += s) },
+    })
+    return { code, stdout, stderr }
+  }
+
+  // 1. --readonly --allow-cmd ssh must be rejected upfront
+  const badSsh = await run([
+    'start',
+    'badssh',
+    '--url',
+    url,
+    '--token',
+    'test-token-v21-0123456789abcdef',
+    '--readonly',
+    '--allow-cmd',
+    'ssh',
+    'check server',
+  ])
+  assert.notEqual(badSsh.code, EXIT_CODES.OK)
+  assert.match(badSsh.stderr, /forbidden in --readonly/)
+
+  // 2. Remote --cwd /srv/app must stay POSIX verbatim, and output must show EUR cost + CHANGED_FILES (fs)
+  const okRun = await run([
+    'start',
+    'srvjob',
+    '--url',
+    url,
+    '--token',
+    'test-token-v21-0123456789abcdef',
+    '--cwd',
+    '/srv/app',
+    'update config',
+  ])
+  assert.equal(okRun.code, EXIT_CODES.OK)
+  assert.equal(receivedCwds[0], '/srv/app')
+  assert.match(okRun.stdout, /~€/)
+  assert.match(okRun.stdout, /CHANGED_FILES \(fs\): M config\.yml/)
+
+  // 3. Status later also shows EUR cost and CHANGED_FILES (fs)
+  const st = await run(['status', 'srvjob', '--url', url, '--token', 'test-token-v21-0123456789abcdef'])
+  assert.equal(st.code, EXIT_CODES.OK)
+  assert.match(st.stdout, /~€/)
+  assert.match(st.stdout, /CHANGED_FILES \(fs\): M config\.yml/)
+
+  // 4. Attempting to resume a full-mode session with --readonly must fail (409 conflict)
+  const modeSwitch = await run([
+    'send',
+    'srvjob',
+    '--url',
+    url,
+    '--token',
+    'test-token-v21-0123456789abcdef',
+    '--readonly',
+    'check again',
+  ])
+  assert.notEqual(modeSwitch.code, EXIT_CODES.OK)
+  assert.match(modeSwitch.stderr, /cannot change safety mode/)
+})
+
+test('v2.1 estimateCostEur and buildPackageBundle work as expected', () => {
+  const eur = estimateCostEur({ inputTokens: 1_000_000, cacheReadTokens: 0, outputTokens: 1_000_000 })
+  assert.ok(eur > 0.9 && eur < 1.0, `unexpected EUR estimate: ${eur}`)
+
+  const bundle = buildPackageBundle()
+  assert.ok(bundle['package.json'])
+  assert.ok(bundle['lib/index.js'])
+  assert.ok(bundle['lib/bridge.js'])
+  assert.ok(bundle['lib/watcher.js'])
+  assert.ok(bundle['bin/ds-subagent.mjs'])
 })

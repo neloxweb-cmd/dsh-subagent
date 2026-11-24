@@ -1,15 +1,16 @@
 /**
- * Sleek, calm Claude Code Mod for @local/dsh-subagent (v2.0.1).
+ * Ultra-clean, native-looking Claude Code / Claude Desktop Mod for @local/dsh-subagent (v2.1.0).
  *
- * Strictly follows Claude Code's static mod validator rules:
+ * Design principles:
+ * - ZERO double borders (uses Claude Desktop's own soft container natively)
+ * - Calm single-line bar by default: `● DeepSeek · auth   Tests draaien (2/4)   1m24s [▾]`
+ * - Clickable expand/collapse Button for the checklist + token count
+ * - Brief 5s green "Klaar" confirmation (or dismissable with `×`), completely hidden when idle
+ *
+ * Strictly obeys Claude Code's static mod validator:
  * - Zero Node.js imports
  * - `$` is always spelled `$.noun.method(...)` at the call site
  * - `on` is always `on("<event>", hook)`
- *
- * Reads atomic `~/.dsh-subagent/live.json`, tolerates transient read glitches,
- * shows a clean compact rounded card with progress bar + humanized status +
- * live checklist while DeepSeek is running, plus a brief green "Klaar" badge
- * before hiding cleanly.
  */
 
 interface TodoItem {
@@ -19,6 +20,7 @@ interface TodoItem {
 
 interface SubagentCard {
   name: string
+  runId: string
   mode?: string
   status: string
   elapsedMs: number
@@ -26,9 +28,12 @@ interface SubagentCard {
   activity: string
   todos: TodoItem[]
   tokens: number
+  costEur: number
 }
 
 let cardsState: SubagentCard[] = []
+let expanded = false
+const dismissedRunIds = new Set<string>()
 let lastPollAt = 0
 let consecutiveErrors = 0
 let tickScheduled = false
@@ -38,15 +43,23 @@ function fmtDuration(ms: number): string {
   if (sec < 60) return `${sec}s`
   const m = Math.floor(sec / 60)
   const s = sec % 60
-  return `${m}m${String(s).padStart(2, '0')}s`
+  return `${m}m ${String(s).padStart(2, '0')}s`
 }
 
-function fmtTokens(n: number): string {
+function fmtTokens(n: number, costEur = 0): string {
   if (!n || n <= 0) return ''
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k tok` : `${n} tok`
+  const tok = n >= 1000 ? `${(n / 1000).toFixed(1)}k tokens` : `${n} tokens`
+  if (!costEur || costEur <= 0) return tok
+  const eur = costEur < 0.01 ? `~€${costEur.toFixed(4).replace('.', ',')}` : `~€${costEur.toFixed(2).replace('.', ',')}`
+  return `${tok} (${eur})`
 }
 
-function clip(text: string, max = 56): string {
+function fmtTools(n: number): string {
+  if (!n || n <= 0) return ''
+  return n === 1 ? '1 stap' : `${n} stappen`
+}
+
+function clip(text: string, max = 46): string {
   const clean = String(text || '').replace(/\s+/g, ' ').trim()
   return clean.length > max ? clean.slice(0, max - 1) + '…' : clean
 }
@@ -58,7 +71,7 @@ function humanizeActivity(raw: string): string {
   const m = /^([a-zA-Z0-9_-]+):\s*(.+)$/.exec(s)
   if (m) {
     const tool = m[1].toLowerCase()
-    const target = clip(m[2], 38)
+    const target = clip(m[2], 32)
     if (tool === 'read' || tool === 'read_file') return `Lezen: ${target}`
     if (tool === 'edit' || tool === 'edit_file' || tool === 'write' || tool === 'write_file' || tool === 'patch') {
       return `Aanpassen: ${target}`
@@ -66,15 +79,9 @@ function humanizeActivity(raw: string): string {
     if (tool === 'pwsh' || tool === 'bash' || tool === 'shell' || tool === 'exec') return `Uitvoeren: ${target}`
     if (tool === 'grep' || tool === 'glob' || tool === 'search' || tool === 'find') return `Zoeken: ${target}`
     if (tool === 'todo_write') return 'Takenlijst bijwerken'
-    return clip(`${tool}: ${target}`, 48)
+    return clip(`${tool}: ${target}`, 40)
   }
-  return clip(s, 48)
-}
-
-function progressBar(done: number, total: number, width = 8): string {
-  if (total <= 0) return ''
-  const filled = Math.max(0, Math.min(width, Math.round((done / total) * width)))
-  return '█'.repeat(filled) + '░'.repeat(width - filled)
+  return clip(s, 40)
 }
 
 function todoMarker(status: TodoItem['status']): string {
@@ -82,7 +89,7 @@ function todoMarker(status: TodoItem['status']): string {
     case 'completed':
       return '✓'
     case 'in_progress':
-      return '▶'
+      return '●'
     case 'cancelled':
       return '×'
     default:
@@ -107,15 +114,21 @@ function toCard(r: any, isRecent: boolean): SubagentCard {
     : Number.isFinite(startedMs)
       ? Math.max(Number(p.elapsedMs || 0), Date.now() - startedMs)
       : Number(p.elapsedMs || 0)
+  const inp = Number(u.inputTokens || 0)
+  const out = Number(u.outputTokens || 0)
+  const cache = Math.min(inp, Number(u.cacheReadTokens || 0))
+  const costEur = ((inp - cache) * 0.25 + cache * 0.03 + out * 0.70) / 1_000_000
   return {
     name: String(r?.name ?? 'deepseek'),
+    runId: String(r?.runId ?? r?.name ?? ''),
     mode: typeof r?.mode === 'string' ? r.mode : undefined,
     status: String(r?.status ?? 'running'),
     elapsedMs,
     toolCalls: Number(p.toolCalls || 0),
     activity: humanizeActivity(String(p.currentActivity || p.lastTool || '')),
     todos: Array.isArray(p.todos) ? p.todos : [],
-    tokens: Number(u.inputTokens || 0) + Number(u.outputTokens || 0),
+    tokens: inp + out,
+    costEur,
   }
 }
 
@@ -127,7 +140,11 @@ function parseLiveSnapshot(raw: unknown): SubagentCard[] | null {
     const updatedMs = Date.parse(String(parsed?.updatedAt ?? ''))
     if (!Number.isFinite(updatedMs) || Date.now() - updatedMs > 180_000) return []
     const active = Array.isArray(parsed?.activeRuns) ? parsed.activeRuns.map((r: any) => toCard(r, false)) : []
-    const recent = Array.isArray(parsed?.recentRuns) ? parsed.recentRuns.map((r: any) => toCard(r, true)) : []
+    const recent = Array.isArray(parsed?.recentRuns)
+      ? parsed.recentRuns
+          .map((r: any) => toCard(r, true))
+          .filter((c: SubagentCard) => !dismissedRunIds.has(c.runId))
+      : []
     return [...active, ...recent].slice(0, 3)
   } catch {
     return null
@@ -198,74 +215,122 @@ export function register(on: any) {
     try {
       const ui = $.ui.resolve(e)
       if (!ui || typeof ui.Box !== 'function' || typeof ui.Text !== 'function') return existing
-      const { Box, Text } = ui
+      const { Box, Text, Button } = ui
 
-      const rendered = cardsState.map((card) => {
+      const rows = cardsState.map((card) => {
         const isRunning = card.status === 'running'
         const isDone = card.status === 'done'
         const isWarn = card.status === 'needs_input' || card.status === 'stuck' || card.status === 'blocked_policy'
-        const dot = isRunning ? '●' : isDone ? '✓' : isWarn ? '!' : '×'
-        const color = isRunning ? 'cyan' : isDone ? 'success' : isWarn ? 'warning' : 'error'
-        const stateText = isRunning
-          ? ''
-          : isDone
-            ? ' · Klaar'
-            : card.status === 'needs_input'
-              ? ' · Vraag nodig'
-              : card.status === 'stuck'
-                ? ' · Vastgelopen'
-                : card.status === 'blocked_policy'
-                  ? ' · Geblokkeerd'
-                  : ' · Gestopt'
-        const modeTag = card.mode && card.mode !== 'full' ? ` [${card.mode}]` : ''
-        const meta = [fmtDuration(card.elapsedMs), `${card.toolCalls} tools`, fmtTokens(card.tokens)]
-          .filter(Boolean)
-          .join(' · ')
+        const dotColor = isRunning ? 'accent' : isDone ? 'success' : isWarn ? 'warning' : 'error'
+        const dot = isDone ? '✓' : '●'
 
-        const rows: any[] = [
+        const doneCount = card.todos.filter((t) => t.status === 'completed').length
+        const countLabel = card.todos.length > 0 ? ` (${doneCount}/${card.todos.length})` : ''
+        const statusSummary = isRunning
+          ? `${card.activity}${countLabel}`
+          : isDone
+            ? 'Klaar'
+            : card.status === 'needs_input'
+              ? 'Vraag nodig'
+              : card.status === 'stuck'
+                ? 'Vastgelopen'
+                : card.status === 'blocked_policy'
+                  ? 'Alleen-lezen geblokkeerd'
+                  : 'Gestopt'
+
+        const rightControls: any[] = [
+          Text({ dimColor: true, children: [fmtDuration(card.elapsedMs)] }),
+        ]
+
+        const hasDetails = card.todos.length > 0 || card.tokens > 0 || card.toolCalls > 0
+        if (typeof Button === 'function' && hasDetails) {
+          rightControls.push(
+            Button({
+              key: `toggle-${card.runId || card.name}`,
+              label: expanded ? '▴' : '▾',
+              onPress: () => {
+                expanded = !expanded
+                try {
+                  $.ui.invalidate('ui.render')
+                } catch {
+                  /* ignore */
+                }
+              },
+            }),
+          )
+        }
+        if (typeof Button === 'function' && !isRunning) {
+          rightControls.push(
+            Button({
+              key: `dismiss-${card.runId || card.name}`,
+              label: '×',
+              onPress: () => {
+                dismissedRunIds.add(card.runId)
+                cardsState = cardsState.filter((c) => c.runId !== card.runId)
+                try {
+                  $.ui.invalidate('ui.render')
+                } catch {
+                  /* ignore */
+                }
+              },
+            }),
+          )
+        }
+
+        const cardChildren: any[] = [
           Box({
             flexDirection: 'row',
             justifyContent: 'space-between',
             columnGap: 2,
             children: [
-              Text({ color, bold: true, children: [`${dot} DeepSeek · ${card.name}${modeTag}${stateText}`] }),
-              Text({ dimColor: true, children: [meta] }),
+              Box({
+                flexDirection: 'row',
+                columnGap: 1,
+                children: [
+                  Text({ color: dotColor, bold: true, children: [dot] }),
+                  Text({ bold: true, children: [`DeepSeek · ${card.name}`] }),
+                  Text({ dimColor: true, children: [statusSummary] }),
+                ],
+              }),
+              Box({
+                flexDirection: 'row',
+                columnGap: 1,
+                children: rightControls,
+              }),
             ],
           }),
         ]
 
-        if (isRunning) {
-          const doneCount = card.todos.filter((t) => t.status === 'completed').length
-          const bar = card.todos.length > 0 ? `${progressBar(doneCount, card.todos.length)} ${doneCount}/${card.todos.length}  ·  ` : ''
-          rows.push(Text({ dimColor: true, children: [`  ${bar}${card.activity}`] }))
+        if (expanded) {
+          if (card.todos.length > 0) {
+            const { items, hiddenCount } = visibleTodos(card.todos, 5)
+            for (const item of items) {
+              cardChildren.push(
+                Text({
+                  color: item.status === 'completed' ? 'success' : item.status === 'in_progress' ? 'accent' : undefined,
+                  dimColor: item.status === 'pending' || item.status === 'cancelled',
+                  children: [`  ${todoMarker(item.status)} ${clip(item.content, 56)}`],
+                }),
+              )
+            }
+            if (hiddenCount > 0) {
+              cardChildren.push(Text({ dimColor: true, children: [`    +${hiddenCount} meer`] }))
+            }
+          }
+          const detailParts = [
+            card.mode === 'readonly' ? 'alleen-lezen' : card.mode === 'workspace' ? 'workspace' : '',
+            fmtTools(card.toolCalls),
+            fmtTokens(card.tokens, card.costEur),
+          ].filter(Boolean)
+          if (detailParts.length > 0) {
+            cardChildren.push(Text({ dimColor: true, children: [`  ${detailParts.join(' · ')}`] }))
+          }
         }
 
-        if (card.todos.length > 0) {
-          const { items, hiddenCount } = visibleTodos(card.todos, 5)
-          for (const item of items) {
-            rows.push(
-              Text({
-                color: item.status === 'completed' ? 'success' : item.status === 'in_progress' ? 'cyan' : undefined,
-                dimColor: item.status === 'pending' || item.status === 'cancelled',
-                children: [`  ${todoMarker(item.status)} ${clip(item.content, 58)}`],
-              }),
-            )
-          }
-          if (hiddenCount > 0) {
-            rows.push(Text({ dimColor: true, children: [`    +${hiddenCount} meer…`] }))
-          }
-        }
-
-        return Box({
-          flexDirection: 'column',
-          borderStyle: 'round',
-          borderColor: isDone ? 'green' : isWarn ? 'yellow' : 'gray',
-          paddingX: 1,
-          children: rows,
-        })
+        return Box({ flexDirection: 'column', children: cardChildren })
       })
 
-      const band = Box({ flexDirection: 'column', children: rendered })
+      const band = Box({ flexDirection: 'column', children: rows })
       return existing ? Box({ flexDirection: 'column', children: [existing, band] }) : band
     } catch {
       return existing
@@ -273,4 +338,4 @@ export function register(on: any) {
   })
 }
 
-export default { name: 'deepseek-subagent', version: '2.0.1', register }
+export default { name: 'deepseek-subagent', version: '2.1.0', register }
