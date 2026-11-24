@@ -3,7 +3,7 @@ name: deepseek-subagent
 description: Delegate coding, refactoring, testing, or read-only server diagnostics to DeepSeek V4.1 Flash inside the official DeepSeek Harness (`ds-subagent` CLI) with durable named sessions, reactive background wakeup, live tasklists, `--mode readonly` safety enforcement, automatic secret redaction, non-git change tracking, and remote Linux server (`--host`) support. Works in both Antigravity and Claude Code.
 ---
 
-# DeepSeek Harness Subagent (`ds-subagent` v2.0)
+# DeepSeek Harness Subagent (`ds-subagent` v2.2)
 
 `ds-subagent` runs DeepSeek V4.1 Flash (1M context window) inside the official DeepSeek Harness `subagent` profile. Every subagent gets a durable **named session**, live progress checklist (`todo_write`), automatic secret redaction, git & non-git file-change tracking, and reactive wakeup.
 
@@ -22,7 +22,7 @@ ds-subagent start <name> --cwd <project-dir> [--mode readonly|workspace|full] "<
 ds-subagent start <name> --cwd <project-dir> --prompt-file <brief.md>
 
 # Strict read-only mode (for production / diagnostics — technically enforced!)
-ds-subagent start audit --cwd /var/www/app --readonly --allow-cmd "git status" --allow-cmd "rg" "Inspect config"
+ds-subagent start audit --cwd /var/www/app --readonly --allow-cmd "git status" --allow-cmd "sqlite3 -readonly" "Inspect config and DB counts"
 
 # Install & run on a remote Linux server (systemd + linger; survives PC sleep/shutdown!)
 ds-subagent host install prod --ssh user@server --api-key-stdin < mistral.key
@@ -50,13 +50,13 @@ ds-subagent update
 
 ### Important Flag & Safety Notes
 - **Safety modes (`--mode` / `--readonly`):**
-  - `--readonly` (or `--mode readonly`): enforced **inside DeepSeek Harness BEFORE tool execution** (sets the real DSH sandbox to `read-only` + fail-closed approval, plus pre-execution policy enforcement returning exit code `13`). Shell-escape binaries (`ssh`, `scp`, `rsync`, `bash`, `node`, `python`, `curl`, etc.) are **forbidden** in `--allow-cmd` — for remote read-only work, always use `--host <alias> --readonly` so readonly is enforced on the server itself.
+  - `--readonly` (or `--mode readonly`): enforced **BEFORE tool execution** via DSH's synchronous `tools.guard()` + native `read-only` sandbox. A single blocked write or disallowed command returns a denial error to DeepSeek so it can continue innocent read work (`BLOCKED_ATTEMPTS` is shown); pure-blocked turns or repeated bypass loops return exit code `13`. Shell-escape binaries (`ssh`, `scp`, `rsync`, `bash`, `node`, `python`, `curl`, bare `sqlite3`, etc.) are **forbidden** in `--allow-cmd`; safe `sqlite3 -readonly` queries (`--allow-cmd "sqlite3 -readonly"`) ARE allowed (with `.shell`/`.output` and mutating SQL blocked). For remote read-only work, always use `--host <alias> --readonly`.
   - `--mode workspace`: sets DSH sandbox to `workspace-write` and blocks write/edit paths outside `--cwd`.
   - `--mode full` (default): full autonomous coding access.
 - **Secret redaction is ON by default:** API keys, Bearer tokens, JWTs, PEM private keys, DB credentials, Amazon LWA tokens/secrets/client IDs (`Atzr|...`, `amzn1.oa2-cs.v1...`, `amzn1.application-oa2-client...`), and `.env` `KEY=`/`SECRET=`/`TOKEN=` lines are automatically redacted from replies, errors, and logs.
 - **Omit `--effort` on Mistral `deepseek-v4-1-flash-1017`** — Mistral rejects explicit `--effort` overrides on that model.
 - **Use `--prompt-file <path>`** for large specs on Windows to avoid shell quoting limits.
-- **Non-git projects supported:** if `--cwd` is not a git repo, `ds-subagent` automatically snapshots files before/after the turn and reports `CHANGED_FILES (fs)`.
+- **Non-git projects & live servers supported:** if `--cwd` is not a git repo, `ds-subagent` tracks DeepSeek's edits and ignores live runtime/DB/log churn (`*.db*`, `*.sqlite*`, `*.log*`, `*.pid`, `*.lock`, `logs/`, `tmp/`), and skips `CHANGED_FILES` in `--readonly` mode. `host install` auto-installs user-local Node 24.9+ (SHA256-verified), `pnpm`, pinned `@deepseek-ai/dsh@0.2.2-rc.5`, and a dedicated `PATH` in systemd.
 
 ## Exit Codes & Exactly How to React
 

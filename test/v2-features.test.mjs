@@ -6,12 +6,19 @@ import test from 'node:test'
 
 import { createBridge } from '../lib/bridge.js'
 import { estimateCostEur, runCli } from '../lib/cli.js'
-import { buildPackageBundle } from '../lib/hosts.js'
+import { buildPackageBundle, buildRemoteSetupScript } from '../lib/hosts.js'
 import { captureWorkspaceSnapshot, computeWorkspaceChanges } from '../lib/index.js'
 import { EXIT_CODES } from '../lib/protocol.js'
 import { redactSecrets } from '../lib/reporter.js'
 import { createStore } from '../lib/store.js'
-import { checkToolPolicy, normalizeTodos, validateReadonlyAllowCommands, watchAgentTurn } from '../lib/watcher.js'
+import {
+  checkToolPolicy,
+  hasShellChaining,
+  normalizeTodos,
+  validateReadonlyAllowCommands,
+  validateSqliteReadonlyCommand,
+  watchAgentTurn,
+} from '../lib/watcher.js'
 
 test('v2 safety: checkToolPolicy enforces readonly, allowlist, chaining guard, and workspace boundary', () => {
   // readonly blocks write tools
@@ -316,4 +323,141 @@ test('v2.1 estimateCostEur and buildPackageBundle work as expected', () => {
   assert.ok(bundle['lib/bridge.js'])
   assert.ok(bundle['lib/watcher.js'])
   assert.ok(bundle['bin/ds-subagent.mjs'])
+})
+
+test('v2.2 sqlite3 -readonly: allows safe SELECT queries (even with >/<) and blocks writes, dot-commands, and redirects', () => {
+  assert.equal(validateReadonlyAllowCommands(['sqlite3 -readonly']), null)
+  assert.match(validateReadonlyAllowCommands(['sqlite3']) ?? '', /without -readonly/)
+
+  const ro = { mode: 'readonly', allowCommands: ['sqlite3 -readonly'] }
+  assert.equal(
+    checkToolPolicy(ro, 'bash', {
+      command: 'sqlite3 -readonly /srv/shop/data.db "SELECT COUNT(*) FROM orders WHERE total > 10 AND qty < 5"',
+    }),
+    null,
+  )
+  assert.match(
+    checkToolPolicy(ro, 'bash', { command: 'sqlite3 /srv/shop/data.db "SELECT 1"' }) ?? '',
+    /without -readonly/,
+  )
+  assert.match(
+    checkToolPolicy(ro, 'bash', { command: 'sqlite3 -readonly /srv/shop/data.db ".shell id"' }) ?? '',
+    /dot-commands/,
+  )
+  assert.match(
+    checkToolPolicy(ro, 'bash', { command: 'sqlite3 -readonly /srv/shop/data.db ".output /tmp/x"' }) ?? '',
+    /dot-commands/,
+  )
+  assert.match(
+    checkToolPolicy(ro, 'bash', { command: 'sqlite3 -readonly /srv/shop/data.db "DELETE FROM orders"' }) ?? '',
+    /mutating SQL/,
+  )
+  assert.match(
+    checkToolPolicy(ro, 'bash', { command: 'sqlite3 -readonly /srv/shop/data.db "SELECT 1; DROP TABLE orders"' }) ?? '',
+    /mutating SQL|semicolon/,
+  )
+  assert.match(
+    checkToolPolicy(ro, 'bash', { command: 'sqlite3 -readonly /srv/shop/data.db "SELECT 1" > /tmp/out.txt' }) ?? '',
+    /chaining\/redirection/,
+  )
+  assert.equal(hasShellChaining('sqlite3 -readonly a.db "SELECT 1 WHERE x > 0"'), false)
+  assert.equal(hasShellChaining('sqlite3 -readonly a.db "SELECT 1" | cat'), true)
+  assert.equal(validateSqliteReadonlyCommand('sqlite3 -readonly a.db "SELECT 1"'), null)
+})
+
+test('v2.2 soft pre-execution guard: one blocked command lets innocent read work finish, while pure-blocked turn exits blocked_policy', async () => {
+  // Case A: blocked write followed by innocent read -> finishes DONE with blockedCalls recorded
+  const eventsA = [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'tool/call', data: { callId: 'c1', name: 'write', arguments: '{"path":"nope.txt","content":"x"}' } },
+    { type: 'tool/result', data: { callId: 'c1', isError: true, message: { toolCallId: 'c1', content: [{ type: 'text', text: 'Denied' }] } } },
+    { type: 'tool/call', data: { callId: 'c2', name: 'read', arguments: '{"path":"ok.txt"}' } },
+    { type: 'tool/result', data: { callId: 'c2', isError: false, message: { toolCallId: 'c2', content: [{ type: 'text', text: 'HELLO' }] } } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Write blocked; read ok.txt = HELLO' }] } } },
+    { type: 'turn/end', data: { reason: { kind: 'completed' } } },
+  ]
+  const agentA = {
+    status: 'idle',
+    cancelled: false,
+    session: { id: 's-soft-a', get seq() { return eventsA.length }, eventAt: (i) => eventsA[i] },
+    whenIdle: () => Promise.resolve(),
+    cancel: async () => { agentA.cancelled = true },
+  }
+  const resA = await watchAgentTurn({
+    agent: agentA,
+    firstSeq: 0,
+    mode: 'readonly',
+    preExecutionGuardActive: true,
+    pollIntervalMs: 10,
+  })
+  assert.equal(agentA.cancelled, false)
+  assert.equal(resA.status, 'done')
+  assert.equal(resA.stats.blockedCalls.length, 1)
+  assert.match(resA.text, /HELLO/)
+
+  // Case B: ONLY a blocked write (0 successful tools) -> blocked_policy (exit 13)
+  const eventsB = [
+    { type: 'turn/start', data: { turn: 1 } },
+    { type: 'tool/call', data: { callId: 'c1', name: 'write', arguments: '{"path":"test3.txt","content":"hallo"}' } },
+    { type: 'tool/result', data: { callId: 'c1', isError: true, message: { toolCallId: 'c1', content: [{ type: 'text', text: 'Denied' }] } } },
+    { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Write was blocked by readonly mode.' }] } } },
+    { type: 'turn/end', data: { reason: { kind: 'completed' } } },
+  ]
+  const agentB = {
+    status: 'idle',
+    cancelled: false,
+    session: { id: 's-soft-b', get seq() { return eventsB.length }, eventAt: (i) => eventsB[i] },
+    whenIdle: () => Promise.resolve(),
+    cancel: async () => { agentB.cancelled = true },
+  }
+  const resB = await watchAgentTurn({
+    agent: agentB,
+    firstSeq: 0,
+    mode: 'readonly',
+    preExecutionGuardActive: true,
+    pollIntervalMs: 10,
+  })
+  assert.equal(resB.status, 'blocked_policy')
+  assert.equal(resB.stats.blockedCalls.length, 1)
+})
+
+test('v2.2 server CHANGED_FILES ignores live DB/log/runtime files mutated by other services', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-subagent-srvfs-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+
+  await writeFile(join(dir, 'app.js'), 'v1', 'utf8')
+  await writeFile(join(dir, 'shop.db'), 'db-v1', 'utf8')
+  await writeFile(join(dir, 'shop.db-wal'), 'wal-v1', 'utf8')
+  await writeFile(join(dir, 'shop.log'), 'log-v1', 'utf8')
+
+  const before = await captureWorkspaceSnapshot(dir)
+  assert.equal(before.mode, 'fs')
+
+  // Simulate background shop services churning DB/WAL/log/pid files AND DeepSeek editing app.js
+  await writeFile(join(dir, 'shop.db'), 'db-v2-longer', 'utf8')
+  await writeFile(join(dir, 'shop.db-wal'), 'wal-v2-longer', 'utf8')
+  await writeFile(join(dir, 'shop.db-shm'), 'shm-new', 'utf8')
+  await writeFile(join(dir, 'shop.log'), 'log-v2-longer', 'utf8')
+  await writeFile(join(dir, 'service.pid'), '12345', 'utf8')
+  await writeFile(join(dir, 'app.js'), 'v2-edited-by-deepseek', 'utf8')
+
+  const diff = await computeWorkspaceChanges(dir, before, {
+    touchedFiles: [join(dir, 'app.js')],
+    hadShellCalls: true,
+  })
+  assert.deepEqual(
+    diff.changedThisTurn.map((c) => `${c.status} ${c.path}`),
+    ['M app.js'],
+  )
+})
+
+test('v2.2 remote Linux installer script enforces Node >= 24.9 with SHA256, pnpm, pinned dsh RC, and systemd PATH', () => {
+  const script = buildRemoteSetupScript({ provider: 'mistral', model: 'deepseek-v4-1-flash-1017' })
+  assert.match(script, /maj>24\|\|\(maj===24&&min>=9\)/)
+  assert.match(script, /SHASUMS256\.txt/)
+  assert.match(script, /sha256sum -c -/)
+  assert.match(script, /npm install --prefix "\$NPM_PREFIX" -g pnpm/)
+  assert.match(script, /@deepseek-ai\/dsh@0\.2\.2-rc\.5/)
+  assert.match(script, /Environment=PATH=\$SERVICE_PATH/)
+  assert.match(script, /XDG_RUNTIME_DIR/)
 })

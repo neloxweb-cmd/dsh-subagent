@@ -1,6 +1,6 @@
 {
   "name": "deepseek-subagent",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "DeepSeek Harness subagent skill + calm live AbovePrompt tasklist mod for Claude Code",
   "author": {
     "name": "neloxweb-cmd"

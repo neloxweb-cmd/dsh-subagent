@@ -1,11 +1,11 @@
-# DeepSeek Subagent (`ds-subagent` v2.1)
+# DeepSeek Subagent (`ds-subagent` v2.2)
 
 Laat **Claude Code** en **Antigravity** samenwerken met **DeepSeek Harness** als echte achtergrond-subagent — met:
 - **Strakke live statusbalk in Claude Code** (lichtgewicht Claude Mod boven je invoerbalk, uitklapbaar met `[▾]`, wegklikbaar met `[×]`, ~1–5 MB RAM)
 - **Automatische wakeup** als DeepSeek klaar is, een vraag heeft of vastloopt
-- **Harde readonly-beveiliging vóór uitvoering:** `--readonly` zet DeepSeek Harness zelf op `read-only` (sandbox + approval fail-closed), blokkeert `ssh`/`scp`/`rsync`/shells in `--allow-cmd`, en redacteert secrets (o.a. Amazon LWA/refresh tokens en `.env`-regels) automatisch uit alle uitvoer
-- **1-commando Linux-server installatie (`host install`):** installeert DSH + `ds-subagent` op je Ubuntu/Linux-server via `systemd --user` + `linger` (loopt door als je pc uit staat), luistert uitsluitend op `127.0.0.1` met token, en stuurt API-keys veilig via stdin (`chmod 600`)
-- **Wijzigingen bijhouden met én zonder git** (ook op remote `--host`), plus **tokens + geschatte kosten in euro's (`~€`)** en autostart standaard aan
+- **Harde readonly-beveiliging vóór uitvoering (zonder onschuldige taken af te breken):** `--readonly` blokkeert schrijfacties en verboden commando's synchroon vóór uitvoering (`tools.guard` + DSH `read-only` sandbox), geeft de fout terug aan DeepSeek zodat hij met lezen verder kan, staat veilig `--allow-cmd "sqlite3 -readonly"` toe, blokkeert `ssh`/`scp`/`rsync`/shells, en redacteert secrets (o.a. Amazon LWA/refresh tokens en `.env`-regels) automatisch uit alle uitvoer
+- **1-commando Linux-server installatie (`host install`):** installeert automatisch user-local Node 24 (met SHA256-checksum, zonder systeem-Node aan te raken), `pnpm`, `@deepseek-ai/dsh@0.2.2-rc.5` en `ds-subagent` via `systemd --user` + `linger` met eigen `PATH` (loopt door als je pc uit staat), luistert uitsluitend op `127.0.0.1` met token, en stuurt API-keys veilig via stdin (`chmod 600`)
+- **Nauwkeurige `CHANGED_FILES` met én zonder git** (ook op live servers: negeert shop-databases/logs van andere diensten), plus **tokens + geschatte kosten in euro's (`~€`)** en autostart standaard aan
 
 ---
 
