@@ -39,11 +39,11 @@ const DSH_HOME = process.env.DSH_HOME || join(HOME, '.dsh')
 const PROFILE_DIR = join(DSH_HOME, 'profiles', 'subagent')
 const DESKTOP_PATCH = join(DSH_HOME, 'profiles', 'desktop', 'cordis.patch.yml')
 
-const SKILL_TARGETS = [
-  join(HOME, '.claude', 'skills', 'deepseek-subagent'),
+const SKILL_ONLY_TARGETS = [
   join(HOME, '.gemini', 'config', 'skills', 'deepseek-subagent'),
   join(HOME, '.agents', 'skills', 'deepseek-subagent'),
 ]
+const CLAUDE_PLUGIN_TARGET = join(HOME, '.claude', 'skills', 'deepseek-subagent')
 
 function log(msg) {
   console.log(msg)
@@ -193,7 +193,8 @@ function doUninstall() {
   const targets = [
     join(BIN_DIR, 'ds-subagent.cmd'),
     join(BIN_DIR, 'ds-subagent'),
-    ...SKILL_TARGETS,
+    CLAUDE_PLUGIN_TARGET,
+    ...SKILL_ONLY_TARGETS,
     APP_DIR,
     PROFILE_DIR,
   ]
@@ -236,7 +237,7 @@ function doInstall() {
   log(`[3/6] Installeren naar ${APP_DIR} ...`)
   if (!DRY_RUN) {
     mkdirSync(APP_DIR, { recursive: true })
-    for (const item of ['package.json', 'cordis.patch.yml', 'install.mjs', 'README.md', 'lib', 'bin', 'skills']) {
+    for (const item of ['package.json', 'cordis.patch.yml', 'install.mjs', 'README.md', 'lib', 'bin', 'skills', 'claude-mod']) {
       const src = join(HERE, item)
       const dst = join(APP_DIR, item)
       if (existsSync(src)) {
@@ -379,11 +380,23 @@ function doInstall() {
     if (added) log(`      -> ${BIN_DIR} automatisch toegevoegd aan je Windows PATH.`)
   }
 
-  // 6. Install shared skill for Claude Code + Antigravity
-  log('[6/6] Skill "deepseek-subagent" installeren voor Claude Code & Antigravity ...')
+  // 6. Install shared skill + Claude Code Mod (live AbovePrompt tasklist)
+  log('[6/6] Skill + Claude Code Mod (live takenlijst) installeren ...')
   const skillSrc = join(HERE, 'skills', 'deepseek-subagent', 'SKILL.md')
+  const modSrc = join(HERE, 'claude-mod')
   if (!DRY_RUN) {
-    for (const dir of SKILL_TARGETS) {
+    // Claude Code plugin/mod bundle (auto-loaded from ~/.claude/skills/deepseek-subagent/)
+    mkdirSync(CLAUDE_PLUGIN_TARGET, { recursive: true })
+    if (existsSync(modSrc)) {
+      cpSync(modSrc, CLAUDE_PLUGIN_TARGET, { recursive: true, force: true })
+    }
+    const claudeSkillDir = join(CLAUDE_PLUGIN_TARGET, 'skills', 'deepseek-subagent')
+    mkdirSync(claudeSkillDir, { recursive: true })
+    cpSync(skillSrc, join(claudeSkillDir, 'SKILL.md'))
+    cpSync(skillSrc, join(CLAUDE_PLUGIN_TARGET, 'SKILL.md'))
+
+    // Antigravity & shared agents skills
+    for (const dir of SKILL_ONLY_TARGETS) {
       mkdirSync(dir, { recursive: true })
       cpSync(skillSrc, join(dir, 'SKILL.md'))
     }

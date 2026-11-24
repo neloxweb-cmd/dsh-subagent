@@ -1,6 +1,11 @@
-# DeepSeek Subagent (`ds-subagent`)
+# DeepSeek Subagent (`ds-subagent` v2.0)
 
-Laat **Claude Code** en **Antigravity** samenwerken met **DeepSeek Harness** als echte achtergrond-subagent — met eigen sessies, automatische wakeup als DeepSeek klaar is of een vraag heeft, en bescherming tegen vastlopen.
+Laat **Claude Code** en **Antigravity** samenwerken met **DeepSeek Harness** als echte achtergrond-subagent — met:
+- **Live takenlijst in Claude Code** (lichtgewicht Claude Mod boven je invoerbalk, ~1–5 MB RAM, geen drukke zijpanelen — verdwijnt vanzelf als hij klaar is)
+- **Automatische wakeup** als DeepSeek klaar is, een vraag heeft of vastloopt
+- **Technische veiligheid:** `--readonly` / `--mode workspace`, command-allowlist (`--allow-cmd`) en automatische secret-redactie op alle uitvoer
+- **Linux-server modus (`--host`):** draai de daemon via `systemd` op je server (SSH-tunnel of Tailscale), zodat taken doorlopen als je pc slaapt of uitgaat
+- **Wijzigingen bijhouden met én zonder git**, plus token-weergave per taak
 
 ---
 
@@ -14,18 +19,17 @@ Laat **Claude Code** en **Antigravity** samenwerken met **DeepSeek Harness** als
 ## Installeren (1 minuut)
 
 ### Op Windows
-1. Pak deze zip-map uit.
+1. Pak deze zip-map **eerst volledig uit** (rechtermuisknop → *Alles uitpakken*).
 2. Dubbelklik op **`INSTALL.cmd`**.
 3. Wacht tot je **`INSTALLATIE GESLAAGD!`** ziet en druk op een toets.
 4. **Sluit Claude Code en/of Antigravity even af en open opnieuw.**
 
-*(Je mag de uitgepakte zip-map daarna gewoon verwijderen — alles is netjes gekopieerd naar `~/.dsh-subagent/app`.)*
-
-### Op macOS / Linux
+### Op macOS / Linux (ook voor een Linux-server)
 ```bash
 node install.mjs
+ds-subagent daemon autostart on
 ```
-Zorg dat `~/bin` in je `PATH` staat (`export PATH="$HOME/bin:$PATH"`), en herstart Claude Code / Antigravity.
+*(Op een Linux-server maakt `daemon autostart on` direct een `systemd --user` service aan die automatisch blijft draaien.)*
 
 ---
 
@@ -35,43 +39,36 @@ Open een **nieuwe** sessie in Claude Code (of Antigravity) en typ:
 
 > Gebruik de `deepseek-subagent` skill (`ds-subagent`) om op de achtergrond aan DeepSeek te vragen of hij bereikbaar is en kort "Hallo vanuit DeepSeek!" terug te sturen.
 
-Claude zet DeepSeek automatisch op de achtergrond aan het werk en wordt vanzelf wakker zodra het antwoord er is.
-
 ---
 
-## Wat de installer voor je regelt
-
-- Maakt een apart DeepSeek Harness-profiel `subagent` aan (je gewone DeepSeek Harness Desktop-profiel blijft onaangeroerd; je model/provider-instellingen worden automatisch overgenomen).
-- Installeert het `ds-subagent`-commando in `~/bin` en voegt dit toe aan je Windows `PATH`.
-- Installeert de `deepseek-subagent` skill voor zowel **Claude Code** (`~/.claude/skills/`) als **Antigravity** (`~/.gemini/config/skills/`).
-
----
-
-## Updaten naar een nieuwe versie
-
-Zodra er een fix of nieuwe versie is, typ in je terminal (of vraag het aan Claude):
+## Handige commando's
 
 ```bash
-ds-subagent update
-```
+# Veilig alleen-lezen op een project of server
+ds-subagent start audit --cwd /pad/naar/app --readonly --allow-cmd "git status" "Controleer de config"
 
-Hij stopt dan automatisch de oude achtergrond-service, downloadt de nieuwste versie, werkt de code én Claude/Antigravity-skill bij, en laat al je sessies en eigen DeepSeek-instellingen intact.
+# Remote Linux-server koppelen (SSH-tunnel wordt automatisch beheerd)
+ds-subagent host add prod --ssh gebruiker@server
+ds-subagent start check --host prod --cwd /srv/app --readonly "Check de logs"
+
+# Live takenlijst in de terminal
+ds-subagent watch
+
+# Daemon automatisch starten met Windows of Linux
+ds-subagent daemon autostart on
+
+# Status checken en direct herstellen als daemon uit staat
+ds-subagent doctor --fix
+
+# Updaten naar de nieuwste versie
+ds-subagent update
+
+# Veilig foutrapport maken (wist automatisch keys, tokens en gebruikersnamen)
+ds-subagent report
+```
 
 ---
 
 ## Verwijderen
 
 Dubbelklik op **`UNINSTALL.cmd`** (of draai `node install.mjs --uninstall`).
-
----
-
-## Hulp bij problemen
-
-- **Iets kapot of vage fout?** Typ in je terminal (of vraag aan Claude):
-  ```bash
-  ds-subagent report
-  ```
-  Dit maakt een veilig, geanonimiseerd foutrapport (API-keys, tokens en je gebruikersnaam worden automatisch gewist) en slaat het op in `~/.dsh-subagent/bug-report.txt`. Kopieer het blok en stuur het door — dan is het zo gefixt.
-- **`ds-subagent` niet herkend?** Sluit je terminal / Claude Code volledig af en open een nieuwe zodat het vernieuwde `PATH` actief wordt.
-- **Check of alles werkt:** open PowerShell of terminal en typ `ds-subagent doctor`.
-- **Live meekijken:** terwijl DeepSeek werkt kun je `http://127.0.0.1:45721` openen in je browser.
