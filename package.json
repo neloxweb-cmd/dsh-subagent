@@ -1,0 +1,32 @@
+{
+  "name": "@local/dsh-subagent",
+  "version": "1.0.0",
+  "description": "Reliable headless DeepSeek Harness subagent plugin and CLI for Antigravity and Claude Code",
+  "type": "module",
+  "main": "./lib/index.js",
+  "bin": {
+    "ds-subagent": "./bin/ds-subagent.mjs"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./protocol": "./lib/protocol.js",
+    "./store": "./lib/store.js",
+    "./watcher": "./lib/watcher.js",
+    "./bridge": "./lib/bridge.js",
+    "./cli": "./lib/cli.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "repository": "https://github.com/neloxweb-cmd/dsh-subagent.git",
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

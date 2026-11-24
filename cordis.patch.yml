@@ -1,0 +1,5 @@
+# @local/dsh-subagent Cordis bundle patch.
+# Mounted automatically when this package is listed in `dsh.profile.bundles`.
+- insert:
+    - id: dsh-subagent
+      name: '@local/dsh-subagent'
