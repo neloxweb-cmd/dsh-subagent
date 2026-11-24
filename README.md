@@ -1,11 +1,11 @@
-# DeepSeek Subagent (`ds-subagent` v2.2)
+# DeepSeek Subagent (`ds-subagent` v2.3)
 
 Laat **Claude Code** en **Antigravity** samenwerken met **DeepSeek Harness** als echte achtergrond-subagent — met:
 - **Strakke live statusbalk in Claude Code** (lichtgewicht Claude Mod boven je invoerbalk, uitklapbaar met `[▾]`, wegklikbaar met `[×]`, ~1–5 MB RAM)
-- **Automatische wakeup** als DeepSeek klaar is, een vraag heeft of vastloopt
+- **Automatische wakeup + lus-detectie:** herkent herhaalde tool-calls (≥3× zonder nieuwe wijziging), stuurt automatisch bij (*"je bent klaar, rapporteer nu"*) en stopt zonodig netjes met status `LOOP` (inclusief stand, takenlijst en gewijzigde bestanden)
 - **Harde readonly-beveiliging vóór uitvoering (zonder onschuldige taken af te breken):** `--readonly` blokkeert schrijfacties en verboden commando's synchroon vóór uitvoering (`tools.guard` + DSH `read-only` sandbox), geeft de fout terug aan DeepSeek zodat hij met lezen verder kan, staat veilig `--allow-cmd "sqlite3 -readonly"` toe, blokkeert `ssh`/`scp`/`rsync`/shells, en redacteert secrets (o.a. Amazon LWA/refresh tokens en `.env`-regels) automatisch uit alle uitvoer
-- **1-commando Linux-server installatie (`host install`):** installeert automatisch user-local Node 24 (met SHA256-checksum, zonder systeem-Node aan te raken), `pnpm`, `@deepseek-ai/dsh@0.2.2-rc.5` en `ds-subagent` via `systemd --user` + `linger` met eigen `PATH` (loopt door als je pc uit staat), luistert uitsluitend op `127.0.0.1` met token, en stuurt API-keys veilig via stdin (`chmod 600`)
-- **Nauwkeurige `CHANGED_FILES` met én zonder git** (ook op live servers: negeert shop-databases/logs van andere diensten), plus **tokens + geschatte kosten in euro's (`~€`)** en autostart standaard aan
+- **1-commando Linux-server installatie (`host install`):** gebruikt altijd zijn eigen dedicated `~/.dsh-subagent/node` (Node 24 met SHA256-checksum, onafhankelijk van andere Node-installaties), eigen `pnpm` + geïsoleerde store (schoont oude `node_modules` op), `@deepseek-ai/dsh@0.2.2-rc.5`, `systemd --user` + `linger` met eigen `PATH` en loopback-only `127.0.0.1` bridge met token
+- **Eerlijke `CHANGED_FILES` op live servers:** meldt bij schrijfklussen zonder git uitsluitend bestanden die DeepSeek zelf via write/edit of aantoonbaar via zijn eigen shell-commando heeft aangeraakt (negeert `.pytest_cache/`, `__pycache__/` en bestanden van andere serverdiensten), plus **tokens + kosten in euro's (`~€`)** en autostart standaard aan
 
 ---
 

@@ -3,7 +3,7 @@ name: deepseek-subagent
 description: Delegate coding, refactoring, testing, or read-only server diagnostics to DeepSeek V4.1 Flash inside the official DeepSeek Harness (`ds-subagent` CLI) with durable named sessions, reactive background wakeup, live tasklists, `--mode readonly` safety enforcement, automatic secret redaction, non-git change tracking, and remote Linux server (`--host`) support. Works in both Antigravity and Claude Code.
 ---
 
-# DeepSeek Harness Subagent (`ds-subagent` v2.2)
+# DeepSeek Harness Subagent (`ds-subagent` v2.3)
 
 `ds-subagent` runs DeepSeek V4.1 Flash (1M context window) inside the official DeepSeek Harness `subagent` profile. Every subagent gets a durable **named session**, live progress checklist (`todo_write`), automatic secret redaction, git & non-git file-change tracking, and reactive wakeup.
 
@@ -56,7 +56,8 @@ ds-subagent update
 - **Secret redaction is ON by default:** API keys, Bearer tokens, JWTs, PEM private keys, DB credentials, Amazon LWA tokens/secrets/client IDs (`Atzr|...`, `amzn1.oa2-cs.v1...`, `amzn1.application-oa2-client...`), and `.env` `KEY=`/`SECRET=`/`TOKEN=` lines are automatically redacted from replies, errors, and logs.
 - **Omit `--effort` on Mistral `deepseek-v4-1-flash-1017`** — Mistral rejects explicit `--effort` overrides on that model.
 - **Use `--prompt-file <path>`** for large specs on Windows to avoid shell quoting limits.
-- **Non-git projects & live servers supported:** if `--cwd` is not a git repo, `ds-subagent` tracks DeepSeek's edits and ignores live runtime/DB/log churn (`*.db*`, `*.sqlite*`, `*.log*`, `*.pid`, `*.lock`, `logs/`, `tmp/`), and skips `CHANGED_FILES` in `--readonly` mode. `host install` auto-installs user-local Node 24.9+ (SHA256-verified), `pnpm`, pinned `@deepseek-ai/dsh@0.2.2-rc.5`, and a dedicated `PATH` in systemd.
+- **Non-git projects & live servers supported:** in non-git directories, `CHANGED_FILES (fs)` reports **only** files touched by DeepSeek's own write/edit/patch tools (or demonstrable shell write targets), ignoring `.pytest_cache/`, `__pycache__/`, and files written by other server processes. In `--readonly` mode, `CHANGED_FILES` is skipped. `host install` installs its own dedicated `~/.dsh-subagent/node` (Node 24.9+, SHA256-verified), `pnpm` (isolated store + clean profile `node_modules`), pinned `@deepseek-ai/dsh@0.2.2-rc.5`, and dedicated systemd `PATH`.
+- **Automatic loop guard:** if DeepSeek repeats the same or near-identical tool call ≥3× without new file edits, `ds-subagent` automatically steers it to stop verifying and write its final report; if it still loops, the turn stops cleanly with status `LOOP` (exit `14`), returning `STAND`, `TASKS`, and `CHANGED_FILES`.
 
 ## Exit Codes & Exactly How to React
 
@@ -64,8 +65,9 @@ ds-subagent update
 |---|---|---|---|
 | `0` | `DONE` | Turn completed cleanly | Check `CHANGED_FILES`, `TASKS`, and token stats; continue with `send` or `close`. |
 | `10` | `NEEDS_INPUT` | DeepSeek asked a question (`ask_user_question` or `[NEEDS_INPUT]`) | Read the question; answer with `ds-subagent send <name> "<decision>"` (or ask the user first). |
-| `11` | `STUCK` | Idle watchdog, max-turn timeout, or repeated tool error loop tripped | Read `ERROR` and `LAST_EVENTS`; unblock with `send` or take over directly. |
+| `11` | `STUCK` | Idle watchdog, max-turn timeout, or repeated tool error loop tripped | Check `STAND`, `TASKS`, `CHANGED_FILES`, and `LAST_EVENTS`; resume with `send` or take over. |
 | `12` | `CANCELLED` | Explicitly cancelled | Resume with `send` or `close`. |
 | `13` | `BLOCKED_POLICY` | Attempted a write or disallowed shell command in `readonly`/`workspace` mode | Review `ERROR`; keep readonly or re-run with explicit `--allow-cmd` / `--mode`. |
+| `14` | `LOOP` | Repetition loop persisted even after automatic finish-up steer | Check `STAND`, `TASKS`, `CHANGED_FILES`, and last summary; work is preserved, finish or `send`. |
 | `4` | `ERROR` | Model/API/runtime error | Inspect error; run `ds-subagent report` if persistent. |
 | `2` | `BRIDGE_DOWN` | Daemon offline | Run `ds-subagent doctor --fix` (local) or check SSH/systemd on remote `--host`. |

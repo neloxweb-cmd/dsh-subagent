@@ -220,7 +220,11 @@ export function register(on: any) {
       const rows = cardsState.map((card) => {
         const isRunning = card.status === 'running'
         const isDone = card.status === 'done'
-        const isWarn = card.status === 'needs_input' || card.status === 'stuck' || card.status === 'blocked_policy'
+        const isWarn =
+          card.status === 'needs_input' ||
+          card.status === 'stuck' ||
+          card.status === 'loop' ||
+          card.status === 'blocked_policy'
         const dotColor = isRunning ? 'accent' : isDone ? 'success' : isWarn ? 'warning' : 'error'
         const dot = isDone ? '✓' : '●'
 
@@ -232,11 +236,13 @@ export function register(on: any) {
             ? 'Klaar'
             : card.status === 'needs_input'
               ? 'Vraag nodig'
-              : card.status === 'stuck'
-                ? 'Vastgelopen'
-                : card.status === 'blocked_policy'
-                  ? 'Alleen-lezen geblokkeerd'
-                  : 'Gestopt'
+              : card.status === 'loop'
+                ? 'Herhaallus gestopt'
+                : card.status === 'stuck'
+                  ? 'Vastgelopen'
+                  : card.status === 'blocked_policy'
+                    ? 'Alleen-lezen geblokkeerd'
+                    : 'Gestopt'
 
         const rightControls: any[] = [
           Text({ dimColor: true, children: [fmtDuration(card.elapsedMs)] }),

@@ -12,8 +12,11 @@ import { EXIT_CODES } from '../lib/protocol.js'
 import { redactSecrets } from '../lib/reporter.js'
 import { createStore } from '../lib/store.js'
 import {
+  buildStandSummary,
   checkToolPolicy,
+  extractShellWritePaths,
   hasShellChaining,
+  normalizeToolCallSignature,
   normalizeTodos,
   validateReadonlyAllowCommands,
   validateSqliteReadonlyCommand,
@@ -460,4 +463,134 @@ test('v2.2 remote Linux installer script enforces Node >= 24.9 with SHA256, pnpm
   assert.match(script, /@deepseek-ai\/dsh@0\.2\.2-rc\.5/)
   assert.match(script, /Environment=PATH=\$SERVICE_PATH/)
   assert.match(script, /XDG_RUNTIME_DIR/)
+  // v2.3 fixes: always own ~/.dsh-subagent/node (never external ~/.local/node24) + clean profile node_modules & isolated pnpm store
+  assert.doesNotMatch(script, /\.local\/node24/)
+  assert.match(script, /rm -rf "\$PROF\/node_modules" "\$PROF\/pnpm-lock\.yaml"/)
+  assert.match(script, /PNPM_STORE_DIR="\$HOME\/\.dsh-subagent\/pnpm-store"/)
+})
+
+test('v2.3 loop guard: auto-steers at 3x repeated timing command, stops as LOOP if ignored, and preserves touchedFiles + standSummary', async () => {
+  const events = [
+    { type: 'turn/start', data: { turn: 1 } },
+    {
+      type: 'todo/write',
+      data: {
+        todos: [
+          { content: 'Script schrijven', status: 'completed' },
+          { content: 'Tests draaien', status: 'completed' },
+          { content: 'Timing checken', status: 'in_progress' },
+        ],
+      },
+    },
+    { type: 'tool/call', data: { callId: 'w1', name: 'write', arguments: '{"path":"margerapport.py","content":"ok"}' } },
+    { type: 'tool/result', data: { callId: 'w1', isError: false, message: { toolCallId: 'w1', content: [{ type: 'text', text: 'wrote' }] } } },
+  ]
+  const steers = []
+  const agent = {
+    status: 'running',
+    cancelled: false,
+    session: { id: 's-loop', get seq() { return events.length }, eventAt: (i) => events[i] },
+    whenIdle: () => Promise.resolve(),
+    cancel: async () => {
+      agent.cancelled = true
+      agent.status = 'idle'
+    },
+  }
+
+  // Push 5 near-identical timing commands (slightly varying run numbers & durations)
+  for (let i = 1; i <= 5; i += 1) {
+    events.push({
+      type: 'tool/call',
+      data: { callId: `b${i}`, name: 'bash', arguments: JSON.stringify({ command: `python3 margerapport.py --run ${i}` }) },
+    })
+    events.push({
+      type: 'tool/result',
+      data: { callId: `b${i}`, isError: false, message: { toolCallId: `b${i}`, content: [{ type: 'text', text: `Done in 12.${i}s` }] } },
+    })
+  }
+
+  const res = await watchAgentTurn({
+    agent,
+    firstSeq: 0,
+    mode: 'workspace',
+    pollIntervalMs: 10,
+    onLoopSteer: (msg) => steers.push(msg),
+  })
+
+  assert.equal(steers.length, 1, 'should auto-steer once at 3x repeats')
+  assert.equal(agent.cancelled, true)
+  assert.equal(res.status, 'loop')
+  assert.equal(res.reason, 'repeated_tool_loop')
+  assert.deepEqual(res.touchedFiles, ['margerapport.py'])
+  assert.match(res.stats.standSummary, /2\/3 taken klaar/)
+  assert.match(res.stats.standSummary, /margerapport\.py/)
+  assert.match(res.text, /margerapport\.py/)
+})
+
+test('v2.3 attribution-only CHANGED_FILES excludes ambient server files, .pytest_cache, and __pycache__', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-subagent-attr-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+
+  await writeFile(join(dir, 'STATUS-ORKEST.md'), 'old', 'utf8')
+  await writeFile(join(dir, 'STATUS-ZOEK.md'), 'old', 'utf8')
+  const before = await captureWorkspaceSnapshot(dir)
+
+  // Other server processes modify STATUS-* and pytest creates .pytest_cache
+  await writeFile(join(dir, 'STATUS-ORKEST.md'), 'updated by orchestrator', 'utf8')
+  await writeFile(join(dir, 'STATUS-AUTOVRIJGAVE.md'), 'new from other service', 'utf8')
+  await writeFile(join(dir, 'STATUS-ZOEK.md'), 'updated by search daemon', 'utf8')
+  // DeepSeek creates margerapport.py, test_margerapport.py, and writes via shell redirect `echo ok > out.txt`
+  await writeFile(join(dir, 'margerapport.py'), 'print("ok")', 'utf8')
+  await writeFile(join(dir, 'test_margerapport.py'), 'def test_ok(): assert True', 'utf8')
+  await writeFile(join(dir, 'out.txt'), 'ok', 'utf8')
+
+  const shellPaths = extractShellWritePaths('pytest -q && echo ok > out.txt && echo x > /dev/null')
+  assert.deepEqual(shellPaths, ['out.txt'])
+
+  const diff = await computeWorkspaceChanges(dir, before, {
+    touchedFiles: ['margerapport.py', 'test_margerapport.py', ...shellPaths, '.pytest_cache/v/cache/nodeids'],
+    hadShellCalls: true,
+    attributionOnly: true,
+  })
+  assert.deepEqual(
+    diff.changedThisTurn.map((c) => `${c.status} ${c.path}`).sort(),
+    ['A margerapport.py', 'A out.txt', 'A test_margerapport.py'],
+  )
+})
+
+test('v2.3 timeout/STUCK always returns standSummary, todos, and touchedFiles even with empty assistant reply', async () => {
+  const events = [
+    { type: 'turn/start', data: { turn: 1 } },
+    {
+      type: 'todo/write',
+      data: {
+        todos: [
+          { content: 'Script klaar', status: 'completed' },
+          { content: 'Stap 4 timing', status: 'in_progress' },
+        ],
+      },
+    },
+    { type: 'tool/call', data: { callId: 'w1', name: 'write', arguments: '{"path":"script.py","content":"x"}' } },
+    { type: 'tool/result', data: { callId: 'w1', isError: false, message: { toolCallId: 'w1', content: [{ type: 'text', text: 'ok' }] } } },
+  ]
+  const agent = {
+    status: 'running',
+    session: { id: 's-to', get seq() { return events.length }, eventAt: (i) => events[i] },
+    whenIdle: () => Promise.resolve(),
+    cancel: async () => { agent.status = 'idle' },
+  }
+  const res = await watchAgentTurn({
+    agent,
+    firstSeq: 0,
+    maxTurnMs: 25,
+    pollIntervalMs: 10,
+  })
+  assert.equal(res.status, 'stuck')
+  assert.equal(res.reason, 'max_turn_timeout')
+  assert.deepEqual(res.touchedFiles, ['script.py'])
+  assert.match(res.stats.standSummary, /1\/2 taken klaar/)
+  assert.match(res.stats.standSummary, /Stap 4 timing/)
+  assert.match(res.text, /1\/2 taken klaar/)
+  assert.ok(normalizeToolCallSignature('bash', { command: 'python3 run.py 1' }).fuzzy === normalizeToolCallSignature('bash', { command: 'python3 run.py 2' }).fuzzy)
+  assert.match(buildStandSummary({ todos: [{ content: 'A', status: 'completed' }], touchedFiles: ['x.py'] }), /1\/1 taken klaar/)
 })
