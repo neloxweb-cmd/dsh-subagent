@@ -34,9 +34,58 @@ interface SubagentCard {
 let cardsState: SubagentCard[] = []
 let expanded = false
 const dismissedRunIds = new Set<string>()
+/** Sessions started/sent/steered from THIS Claude chat (name -> expiry ms). */
+const ownedSessions = new Map<string, number>()
 let lastPollAt = 0
 let consecutiveErrors = 0
 let tickScheduled = false
+
+function extractCommandText(e: any): string {
+  const candidates = [
+    e?.input?.command,
+    e?.tool_input?.command,
+    e?.args?.command,
+    e?.command,
+  ]
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c
+  }
+  try {
+    const obj = e?.input ?? e?.tool_input ?? e?.args
+    if (obj && typeof obj === 'object') return JSON.stringify(obj)
+  } catch {
+    /* ignore */
+  }
+  return ''
+}
+
+function trackSubagentCommands(cmd: string): boolean {
+  if (!cmd || !/ds-subagent/i.test(cmd)) return false
+  let touched = false
+  const re = /\bds-subagent(?:\.cmd|\.mjs)?\s+(start|send|steer|close)\s+["']?([a-zA-Z0-9][a-zA-Z0-9._-]{0,63})["']?/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(cmd)) !== null) {
+    const verb = m[1].toLowerCase()
+    const name = m[2]
+    if (!name || name.startsWith('-')) continue
+    if (verb === 'close') {
+      if (ownedSessions.has(name)) {
+        ownedSessions.set(name, Date.now() + 8000)
+        touched = true
+      }
+    } else {
+      ownedSessions.set(name, Date.now() + 2 * 60 * 60 * 1000)
+      touched = true
+    }
+  }
+  return touched
+}
+
+function pruneOwnedSessions(now: number): void {
+  for (const [name, exp] of ownedSessions) {
+    if (exp <= now) ownedSessions.delete(name)
+  }
+}
 
 function fmtDuration(ms: number): string {
   const sec = Math.max(0, Math.round((ms || 0) / 1000))
@@ -166,12 +215,36 @@ function buildLivePath(explicitHome: unknown, userProfile: unknown, unixHome: un
 }
 
 export function register(on: any) {
+  on('tool.call', async ($: any, e: any, next: any) => {
+    try {
+      const cmd = extractCommandText(e)
+      if (trackSubagentCommands(cmd)) {
+        lastPollAt = 0
+        try {
+          $.ui.invalidate('ui.render')
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* never block tool calls */
+    }
+    return next(e)
+  })
+
   on('ui.render', async ($: any, e: any, next: any) => {
     const existing = await next(e)
     if (e?.component !== 'AbovePrompt') return existing
 
     const now = Date.now()
-    const pollInterval = cardsState.length > 0 ? 1000 : 2500
+    pruneOwnedSessions(now)
+    // Chat-scoped: never show or poll anything in chats that did not launch a DeepSeek subagent.
+    if (ownedSessions.size === 0) {
+      cardsState = []
+      return existing
+    }
+
+    const pollInterval = cardsState.length > 0 ? 1000 : 2000
     if (now - lastPollAt >= pollInterval) {
       lastPollAt = now
       try {
@@ -184,7 +257,7 @@ export function register(on: any) {
           const raw = await $.fs.read(livePath)
           const parsed = parseLiveSnapshot(raw)
           if (parsed !== null) {
-            cardsState = parsed
+            cardsState = parsed.filter((card) => ownedSessions.has(card.name))
             consecutiveErrors = 0
           } else {
             consecutiveErrors += 1
@@ -197,7 +270,7 @@ export function register(on: any) {
       }
     }
 
-    if (!tickScheduled) {
+    if (!tickScheduled && ownedSessions.size > 0) {
       tickScheduled = true
       const nextDelay = cardsState.length > 0 ? 1200 : 3000
       setTimeout(() => {
