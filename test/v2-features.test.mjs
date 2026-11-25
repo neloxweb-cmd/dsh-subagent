@@ -469,7 +469,7 @@ test('v2.2 remote Linux installer script enforces Node >= 24.9 with SHA256, pnpm
   assert.match(script, /PNPM_STORE_DIR="\$HOME\/\.dsh-subagent\/pnpm-store"/)
 })
 
-test('v2.3 loop guard: auto-steers at 3x repeated timing command, stops as LOOP if ignored, and preserves touchedFiles + standSummary', async () => {
+test('v2.3 loop guard: auto-steers at 4x repeated timing command, stops as LOOP if ignored, and preserves touchedFiles + standSummary', async () => {
   const events = [
     { type: 'turn/start', data: { turn: 1 } },
     {
@@ -497,8 +497,9 @@ test('v2.3 loop guard: auto-steers at 3x repeated timing command, stops as LOOP 
     },
   }
 
-  // Push 5 near-identical timing commands (slightly varying run numbers & durations)
-  for (let i = 1; i <= 5; i += 1) {
+  // Push 7 near-identical timing commands (slightly varying run numbers & durations):
+  // steer after the 4th, LOOP after 3 more ignored repeats.
+  for (let i = 1; i <= 7; i += 1) {
     events.push({
       type: 'tool/call',
       data: { callId: `b${i}`, name: 'bash', arguments: JSON.stringify({ command: `python3 margerapport.py --run ${i}` }) },
@@ -517,7 +518,7 @@ test('v2.3 loop guard: auto-steers at 3x repeated timing command, stops as LOOP 
     onLoopSteer: (msg) => steers.push(msg),
   })
 
-  assert.equal(steers.length, 1, 'should auto-steer once at 3x repeats')
+  assert.equal(steers.length, 1, 'should auto-steer once at 4x repeats')
   assert.equal(agent.cancelled, true)
   assert.equal(res.status, 'loop')
   assert.equal(res.reason, 'repeated_tool_loop')
@@ -525,6 +526,71 @@ test('v2.3 loop guard: auto-steers at 3x repeated timing command, stops as LOOP 
   assert.match(res.stats.standSummary, /2\/3 taken klaar/)
   assert.match(res.stats.standSummary, /margerapport\.py/)
   assert.match(res.text, /margerapport\.py/)
+})
+
+function loopTestAgent(events, id) {
+  const agent = {
+    status: 'running',
+    cancelled: false,
+    session: { id, get seq() { return events.length }, eventAt: (i) => events[i] },
+    whenIdle: () => Promise.resolve(),
+    cancel: async () => {
+      agent.cancelled = true
+      agent.status = 'idle'
+    },
+  }
+  return agent
+}
+
+function pushCall(events, id, name, args, text) {
+  events.push({ type: 'tool/call', data: { callId: id, name, arguments: JSON.stringify(args) } })
+  events.push({
+    type: 'tool/result',
+    data: { callId: id, isError: false, message: { toolCallId: id, content: [{ type: 'text', text }] } },
+  })
+}
+
+test('v2.3.1 loop guard: reading other ranges of the same file / sed on other lines is progress, not a loop', async () => {
+  const events = [{ type: 'turn/start', data: { turn: 1 } }]
+  // Live false positive 1: read of the same test file at different offsets (different content)
+  for (let i = 0; i < 8; i += 1) {
+    pushCall(events, `r${i}`, 'read', { file_path: '/srv/app/tests/test_x.py', offset: 1 + i * 40, limit: 40 }, `def test_case_${'abcdefgh'[i]}(): band ${'ABCDEFGH'[i]} ok`)
+  }
+  // Live false positive 2: sed -n on different line ranges of the same file (different output)
+  for (let i = 0; i < 8; i += 1) {
+    pushCall(events, `s${i}`, 'bash', { command: `sed -n ${10 + i * 20},${30 + i * 20}p shop/pricing.py` }, `def functie_${'abcdefgh'[i]}(rij): return rij`)
+  }
+  // Re-running pytest with a changing outcome (fewer failures) is progress too
+  pushCall(events, 'p1', 'bash', { command: '.venv/bin/python -m pytest tests/test_x.py -q' }, '2 failed, 24 passed in 0.10s')
+  pushCall(events, 'p2', 'bash', { command: '.venv/bin/python -m pytest tests/test_x.py -q' }, '1 failed, 25 passed in 0.11s')
+  pushCall(events, 'p3', 'bash', { command: '.venv/bin/python -m pytest tests/test_x.py -q' }, '26 passed in 0.10s')
+  events.push({ type: 'turn/end', data: { reason: 'completed' } })
+  const agent = loopTestAgent(events, 's-noloop')
+  agent.status = 'idle'
+  const steers = []
+  const res = await watchAgentTurn({ agent, firstSeq: 0, mode: 'workspace', pollIntervalMs: 10, onLoopSteer: (m) => steers.push(m) })
+  assert.equal(steers.length, 0, 'no steer for normal reading/editing work')
+  assert.notEqual(res.status, 'loop')
+  assert.equal(agent.cancelled, false)
+})
+
+test('v2.3.1 loop guard: after a steer, a different call is progress and does not count towards LOOP', async () => {
+  const events = [{ type: 'turn/start', data: { turn: 1 } }]
+  for (let i = 1; i <= 4; i += 1) {
+    pushCall(events, `t${i}`, 'bash', { command: `python3 rapport.py --run ${i}` }, `Klaar in 12.${i} s`)
+  }
+  // Steered: agent now does other, distinct work
+  pushCall(events, 'o1', 'read', { file_path: 'rapport.py', offset: 1, limit: 50 }, 'import sqlite3')
+  pushCall(events, 'o2', 'bash', { command: 'wc -l rapport.py' }, '325 rapport.py')
+  pushCall(events, 'o3', 'grep', { pattern: 'def ', path: 'rapport.py' }, 'def main():')
+  events.push({ type: 'turn/end', data: { reason: 'completed' } })
+  const agent = loopTestAgent(events, 's-steer-progress')
+  agent.status = 'idle'
+  const steers = []
+  const res = await watchAgentTurn({ agent, firstSeq: 0, mode: 'workspace', pollIntervalMs: 10, onLoopSteer: (m) => steers.push(m) })
+  assert.equal(steers.length, 1)
+  assert.notEqual(res.status, 'loop')
+  assert.equal(agent.cancelled, false)
 })
 
 test('v2.3 attribution-only CHANGED_FILES excludes ambient server files, .pytest_cache, and __pycache__', async (t) => {
